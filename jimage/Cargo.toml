@@ -17,6 +17,9 @@ readme          = "Readme.md"
 jimage-sys      = { path = "../jimage-sys", version = "0.1.0" }
 jni-sys         = "0.3"
 
+[dev-dependencies]
+lazy_static     = "1"
+
 [package.metadata.docs.rs]
 features        = ["nightly"]
 
