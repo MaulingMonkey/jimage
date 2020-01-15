@@ -40,7 +40,7 @@ fn aojdk13() -> Result<PathBuf> {
 }
 
 fn jdk13() -> Result<PathBuf> {
-    let jdk = native_program_files()?.join("jdk13");
+    let jdk = native_program_files()?.join("Java").join("jdk13");
     if !jdk.exists() {
         Err(Error::new(ErrorKind::NotFound, "Couldn't find a JDK 13 installation of the same architecture"))
     } else {
