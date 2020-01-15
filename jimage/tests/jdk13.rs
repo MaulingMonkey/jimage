@@ -1,10 +1,11 @@
 #![cfg(windows)]
 
+use std::io::{Error, ErrorKind, Result};
 use std::ffi::*;
 use std::path::*;
 
 #[test] fn aojdk13_contains_java_lang_object() {
-    let aojdk13 = aojdk13();
+    let aojdk13 = aojdk13().or_else(|_| jdk13()).expect("Expected a JDK 13 or AdoptOpenJDK 13 installation of the same architecture to test against");
     let lib = jimage::Library::load(aojdk13.join("bin").join(jimage::Library::NAME)).unwrap();
     let mods = lib.open(aojdk13.join("lib").join("modules")).unwrap();
     let mut found_object = false;
@@ -29,16 +30,29 @@ use std::path::*;
     assert_is_class(&res);
 }
 
-fn aojdk13() -> PathBuf {
-    let pf = if cfg!(target_arch = "x86_64") { "ProgramW6432" } else { "ProgramFiles(x86)" };
-    let pf = std::env::var_os(pf).or(std::env::var_os("ProgramFiles")).unwrap_or_else(|| panic!("Neither %{}% nor %ProgramFiles% was set, cannot find AdoptOpenJDK 13", pf));
-    let pf = PathBuf::from(pf);
-    let aojdk = pf.join("AdoptOpenJDK");
-    let aojdk = aojdk.read_dir().unwrap_or_else(|err| panic!("Couldn't enumerate {}: {}", aojdk.display(), err));
-    for dir in aojdk.filter_map(|d| d.ok()) {
-        if dir.file_name().to_string_lossy().starts_with("jdk-13.") { return dir.path(); }
+fn aojdk13() -> Result<PathBuf> {
+    let aojdk = native_program_files()?.join("AdoptOpenJDK");
+    for dir in aojdk.read_dir()? {
+        let dir = dir?;
+        if dir.file_name().to_string_lossy().starts_with("jdk-13.") { return Ok(dir.path()); }
     }
-    panic!("AdoptOpenJDK 13 installation not found for this architecture");
+    Err(Error::new(ErrorKind::NotFound, "Couldn't find an AdoptOpenJDK 13 installation of the same architecture"))
+}
+
+fn jdk13() -> Result<PathBuf> {
+    let jdk = native_program_files()?.join("jdk13");
+    if !jdk.exists() {
+        Err(Error::new(ErrorKind::NotFound, "Couldn't find a JDK 13 installation of the same architecture"))
+    } else {
+        Ok(jdk)
+    }
+}
+
+fn native_program_files() -> Result<PathBuf> {
+    let pf = if cfg!(target_arch = "x86_64") { "ProgramW6432" } else { "ProgramFiles(x86)" };
+    let pf = std::env::var_os(pf).or(std::env::var_os("ProgramFiles")).ok_or_else(|| Error::new(ErrorKind::NotFound, format!("Neither %{}% nor %ProgramFiles% was set, cannot find AdoptOpenJDK 13", pf)))?;
+    let pf = PathBuf::from(pf);
+    Ok(pf)
 }
 
 fn assert_is_class(res: &jimage::Resource) {
