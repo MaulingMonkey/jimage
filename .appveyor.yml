@@ -12,6 +12,3 @@ install:
 
 build_script:
   - cargo build --all
-
-test_script:
-  - cargo test --all
