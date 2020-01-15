@@ -2,7 +2,7 @@
 
 [package]
 name            = "jimage"
-version         = "0.2.0"
+version         = "0.2.1"
 authors         = ["MaulingMonkey <git@maulingmonkey.com>"]
 edition         = "2018"
 description     = "Safe bindings to jimage.dll, allowing you to read jimage format 'modules' files from AdoptOpenJDK containing class metadata, resources, etc."
