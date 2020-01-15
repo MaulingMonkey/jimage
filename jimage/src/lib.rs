@@ -9,6 +9,7 @@ use std::ops::Drop;
 use std::os::raw::*;
 use std::path::*;
 use std::ptr::*;
+use std::sync::Arc;
 
 /// A re-export of [std::io::Error](https://doc.rust-lang.org/std/io/struct.Error.html)
 pub type Error = std::io::Error;
@@ -35,7 +36,7 @@ pub type Result<T> = std::io::Result<T>;
 /// similar hypotheticals involving bogus libc.so s with misdefined malloc symbols.
 /// 
 /// [Box::new]:         https://doc.rust-lang.org/std/boxed/struct.Box.html#method.new
-pub struct Library(sys::Library);
+pub struct Library(Arc<sys::Library>);
 
 impl Library {
     /// The typical, expected name of the library on this platform - e.g. `"jimage.dll"` or `"libjimage.so"`
@@ -44,21 +45,21 @@ impl Library {
     #[cfg(unix)]    const _NAME : &'static str = "libjimage.so";
 
     /// Load a jimage library such as `jdk-13.0.1.9-hotspot/bin/jimage.dll`
-    pub fn load(path: impl AsRef<Path>) -> Result<Self> { Ok(Self(sys::Library::load(path.as_ref())?)) }
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> { Ok(Self(Arc::new(sys::Library::load(path.as_ref())?))) }
 
     /// Open a jimage-format file such as `jdk-13.0.1.9-hotspot/lib/modules`
     pub fn open(&self, path: impl AsRef<Path>) -> Result<File> { File::open(self, path) }
 }
 
 /// A loaded jimage file such as `jdk-13.0.1.9-hotspot/lib/modules`
-pub struct File<'lib> {
-    api:    &'lib sys::Library,
+pub struct File {
+    api:    Arc<sys::Library>,
     file:   *mut sys::JImageFile,
 }
 
-impl<'lib> File<'lib> {
+impl File {
     /// Open a jimage-format file such as `jdk-13.0.1.9-hotspot/lib/modules`
-    pub fn open(api: &'lib Library, path: impl AsRef<Path>) -> Result<Self> {
+    pub fn open(api: &Library, path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let path = path.to_str().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("Couldn't convert path {} to JIMAGE_Open friendly path", path.display())))?;
         let mut path = path.bytes().map(|b| b as c_char).collect::<Vec<c_char>>();
@@ -69,7 +70,7 @@ impl<'lib> File<'lib> {
         if file == null_mut() { return Err(ji2io(err)); }
 
         Ok(Self{
-            api: &api.0,
+            api: Arc::clone(&api.0),
             file,
         })
     }
@@ -85,7 +86,7 @@ impl<'lib> File<'lib> {
     }
 
     /// Map a module ("java.base"), version ("9.0"), and name ("java/lang/Object.class") to a size + location.
-    pub fn find_resource<'s>(&'s self, module_name: &CStr, version: &CStr, name: &CStr) -> Result<Resource<'s, 'lib>> {
+    pub fn find_resource<'s>(&'s self, module_name: &CStr, version: &CStr, name: &CStr) -> Result<Resource<'s>> {
         let mut size = 0;
         let result = unsafe { (self.api.JIMAGE_FindResource)(self.file, module_name.as_ptr(), version.as_ptr(), name.as_ptr(), &mut size) };
         if result <= 0 {
@@ -121,15 +122,15 @@ impl<'lib> File<'lib> {
     }
 }
 
-impl Drop for File<'_> {
+impl Drop for File {
     fn drop(&mut self) {
         unsafe { (self.api.JIMAGE_Close)(self.file) };
     }
 }
 
 /// The location and size of a jimage resource such as `java/lang/Object.class`
-pub struct Resource<'file, 'lib> {
-    file:       &'file File<'lib>,
+pub struct Resource<'file> {
+    file:       &'file File,
     location:   sys::JImageLocationRef,
     size:       u64,
     // I don't know if it's sound to mix sys::JImageLocationRef s with different files.
@@ -138,7 +139,7 @@ pub struct Resource<'file, 'lib> {
     // in question.
 }
 
-impl Resource<'_, '_> {
+impl Resource<'_> {
     /// How large this resource is in bytes
     pub fn size(&self) -> u64 { self.size }
 
@@ -157,8 +158,8 @@ impl Resource<'_, '_> {
 /// The parameters to [File::visit]
 /// 
 /// [File::visit]:          struct.File.html#method.visit
-pub struct VisitParams<'file, 'lib> {
-    file:           &'file File<'lib>,
+pub struct VisitParams<'file> {
+    file:           &'file File,
     module_name:    &'file CStr,
     version:        &'file CStr,
     package:        &'file CStr,
@@ -166,7 +167,7 @@ pub struct VisitParams<'file, 'lib> {
     extension:      &'file CStr,
 }
 
-impl<'file, 'lib> VisitParams<'file, 'lib> {
+impl<'file> VisitParams<'file> {
     /// The module name (e.g. `"java.base"`)
     pub fn module_name_cstr(&self)  -> &'file CStr { self.module_name }
     /// The module version (e.g. `"9"` or `"9.0"`)
@@ -190,7 +191,7 @@ impl<'file, 'lib> VisitParams<'file, 'lib> {
     pub fn extension(&self)     -> Result<&'file str> { self.extension      .to_str().map_err(|_| Error::new(ErrorKind::InvalidData, format!("extension {:?} isn't valid UTF8",     self.extension    ))) }
 
     /// Get a resource handle allowing you to read the file in question
-    pub fn resource(&self) -> Result<Resource<'file, 'lib>> {
+    pub fn resource(&self) -> Result<Resource<'file>> {
         self.file.find_resource(self.module_name, self.version, CStr::from_bytes_with_nul(format!(
             "{}/{}.{}\0",
             self.package    .to_str().map_err(|_| Error::new(ErrorKind::InvalidData, format!("resource package name {:?} isn't valid UTF8",   self.package    )))?,
@@ -209,8 +210,8 @@ impl<'file, 'lib> VisitParams<'file, 'lib> {
     Continue,
 }
 
-struct VisitContext<'file, 'lib, F: FnMut(VisitParams) -> VisitResult> {
-    file:   &'file File<'lib>,
+struct VisitContext<'file, F: FnMut(VisitParams) -> VisitResult> {
+    file:   &'file File,
     f:      F,
 }
 
