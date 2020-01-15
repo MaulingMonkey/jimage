@@ -1,0 +1,27 @@
+# https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[package]
+name            = "jimage-sys"
+version         = "0.1.0"
+authors         = ["MaulingMonkey <git@maulingmonkey.com>"]
+edition         = "2018"
+description     = "Raw FFI bindings to jimage.dll, allowing you to read jimage format 'modules' files from AdoptOpenJDK containing class metadata, resources, etc."
+repository      = "https://github.com/MaulingMonkey/jimage"
+keywords        = ["java", "jvm", "jimage", "0xCAFEDADA"]
+categories      = ["external-ffi-bindings"]
+license         = "BSD-3-Clause"
+include         = ["/**/*.rs", "/Cargo.toml", "/LICENSE", "/Readme.md"]
+readme          = "Readme.md"
+
+[dependencies]
+jni-sys         = "0.3"
+minidl          = "0.1"
+
+[package.metadata.docs.rs]
+features        = ["nightly"]
+
+[badges]
+maintenance     = { status = "experimental" }
+
+[features]
+nightly         = []

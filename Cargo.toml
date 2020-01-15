@@ -1,0 +1,7 @@
+# https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[workspace]
+members = [
+    "jimage-sys",
+    "jimage",
+]
