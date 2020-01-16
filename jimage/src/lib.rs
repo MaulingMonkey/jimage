@@ -3,6 +3,7 @@
 
 use jimage_sys as sys;
 use jni_sys::jlong;
+use std::fmt::Display;
 use std::ffi::*;
 use std::io::*;
 use std::ops::Drop;
@@ -60,14 +61,14 @@ pub struct File {
 impl File {
     /// Open a jimage-format file such as `jdk-13.0.1.9-hotspot/lib/modules`
     pub fn open(api: &Library, path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let path = path.to_str().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("Couldn't convert path {} to JIMAGE_Open friendly path", path.display())))?;
+        let orig = path.as_ref();
+        let path = orig.to_str().ok_or_else(|| Error::new(ErrorKind::InvalidInput, format!("File::open(api, {:?}) failed: couldn't convert path UTF8", orig)))?;
         let mut path = path.bytes().map(|b| b as c_char).collect::<Vec<c_char>>();
         path.push(0);
 
         let mut err = 0;
         let file = unsafe { (api.0.JIMAGE_Open)(path.as_ptr(), &mut err) };
-        if file == null_mut() { return Err(ji2io(err)); }
+        if file == null_mut() { return Err(ji2io(format!("File::open(api, {:?}) failed", path), err)); }
 
         Ok(Self{
             api: Arc::clone(&api.0),
@@ -81,7 +82,7 @@ impl File {
         if result != null() {
             Ok(unsafe { CStr::from_ptr(result) })
         } else {
-            Err(Error::new(ErrorKind::NotFound, format!("No such package {:?}", package_name)))
+            Err(Error::new(ErrorKind::NotFound, format!("file.package_to_module({:?}) failed: no such package", package_name)))
         }
     }
 
@@ -90,7 +91,7 @@ impl File {
         let mut size = 0;
         let result = unsafe { (self.api.JIMAGE_FindResource)(self.file, module_name.as_ptr(), version.as_ptr(), name.as_ptr(), &mut size) };
         if result <= 0 {
-            Err(ji2io(result))
+            Err(ji2io(format!("file.find_resource({:?}, {:?}, {:?}) failed", module_name, version, name), result))
         } else {
             Ok(Resource{
                 file:       self,
@@ -148,7 +149,7 @@ impl Resource<'_> {
         let len = (buffer.len() as u64).min(std::i64::MAX as u64) as i64;
         let result = unsafe { (self.file.api.JIMAGE_GetResource)(self.file.file, self.location, buffer.as_mut_ptr() as *mut _, len) };
         if result < 0 {
-            Err(ji2io(result))
+            Err(ji2io("resource.get(...) failed", result))
         } else {
             Ok(result as u64)
         }
@@ -215,17 +216,17 @@ struct VisitContext<'file, F: FnMut(VisitParams) -> VisitResult> {
     f:      F,
 }
 
-fn ji2io(err: impl Into<jlong>) -> Error {
+fn ji2io(prefix: impl Display, err: impl Into<jlong>) -> Error {
     const JIMAGE_NOT_FOUND      : jlong = sys::JIMAGE_NOT_FOUND as jlong;
     const JIMAGE_BAD_MAGIC      : jlong = sys::JIMAGE_BAD_MAGIC as jlong;
     const JIMAGE_BAD_VERSION    : jlong = sys::JIMAGE_BAD_VERSION as jlong;
     const JIMAGE_CORRUPTED      : jlong = sys::JIMAGE_CORRUPTED as jlong;
 
     match err.into() {
-        JIMAGE_NOT_FOUND    => Error::new(ErrorKind::NotFound,      "JIMAGE_NOT_FOUND"),
-        JIMAGE_BAD_MAGIC    => Error::new(ErrorKind::InvalidData,   "JIMAGE_BAD_MAGIC"),
-        JIMAGE_BAD_VERSION  => Error::new(ErrorKind::InvalidData,   "JIMAGE_BAD_VERSION"),
-        JIMAGE_CORRUPTED    => Error::new(ErrorKind::InvalidData,   "JIMAGE_CORRUPTED"),
-        other               => Error::new(ErrorKind::Other,         format!("JIMAGE_??? ({})", other)),
+        JIMAGE_NOT_FOUND    => Error::new(ErrorKind::NotFound,      format!("{}: JIMAGE_NOT_FOUND",     prefix)),
+        JIMAGE_BAD_MAGIC    => Error::new(ErrorKind::InvalidData,   format!("{}: JIMAGE_BAD_MAGIC",     prefix)),
+        JIMAGE_BAD_VERSION  => Error::new(ErrorKind::InvalidData,   format!("{}: JIMAGE_BAD_VERSION",   prefix)),
+        JIMAGE_CORRUPTED    => Error::new(ErrorKind::InvalidData,   format!("{}: JIMAGE_CORRUPTED",     prefix)),
+        other               => Error::new(ErrorKind::Other,         format!("{}: JIMAGE_??? ({})",      prefix, other)),
     }
 }
