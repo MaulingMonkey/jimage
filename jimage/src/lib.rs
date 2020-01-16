@@ -55,8 +55,10 @@ impl Library {
 /// A loaded jimage file such as `jdk-13.0.1.9-hotspot/lib/modules`
 pub struct File {
     api:    Arc<sys::Library>,
-    file:   *mut sys::JImageFile,
+    file:   AssertThreadSafe<*mut sys::JImageFile>,
 }
+fn _assert_file_is_send(file: &File) -> &dyn Send { file }
+fn _assert_file_is_sync(file: &File) -> &dyn Sync { file }
 
 impl File {
     /// Open a jimage-format file such as `jdk-13.0.1.9-hotspot/lib/modules`
@@ -70,6 +72,17 @@ impl File {
         let file = unsafe { (api.0.JIMAGE_Open)(path.as_ptr(), &mut err) };
         if file == null_mut() { return Err(ji2io(format!("File::open(api, {:?}) failed", path), err)); }
 
+        // Safety:  I've taken a quick audit of jimage's C++ source code.  Once you look past the initial C entry
+        // points, it quickly starts using `const` appropriately.  Parsing is up front, all the getters are nice and
+        // const-qualified, and I see no mutable keywords nor const_cast s.  While something still could've slipped by
+        // me, I'm relatively comfortable labeling the file APIs called on an open file thread safe.
+        // 
+        //  References:
+        // https://github.com/AdoptOpenJDK/openjdk-jdk13u/blob/f3283b6e2d7676423a23c372754ceef7d2ee731f/src/java.base/share/native/libjimage/jimage.cpp
+        // https://github.com/AdoptOpenJDK/openjdk-jdk13u/blob/f3283b6e2d7676423a23c372754ceef7d2ee731f/src/java.base/share/native/libjimage/imageFile.hpp
+        // https://github.com/AdoptOpenJDK/openjdk-jdk13u/blob/f3283b6e2d7676423a23c372754ceef7d2ee731f/src/java.base/share/native/libjimage/imageFile.cpp
+        let file = unsafe { AssertThreadSafe::new(file) };
+
         Ok(Self{
             api: Arc::clone(&api.0),
             file,
@@ -78,9 +91,9 @@ impl File {
 
     /// Map a package ("java/lang") to a module ("java.base")
     pub fn package_to_module<'s>(&'s self, package_name: &CStr) -> Result<&'s CStr> {
-        let result = unsafe { (self.api.JIMAGE_PackageToModule)(self.file, package_name.as_ptr()) };
+        let result = unsafe { (self.api.JIMAGE_PackageToModule)(*self.file, package_name.as_ptr()) };
         if result != null() {
-            Ok(unsafe { CStr::from_ptr(result) })
+            Ok(unsafe { CStr::from_ptr(result) }) // C string lasts as long as th file does
         } else {
             Err(Error::new(ErrorKind::NotFound, format!("file.package_to_module({:?}) failed: no such package", package_name)))
         }
@@ -89,7 +102,7 @@ impl File {
     /// Map a module ("java.base"), version ("9.0"), and name ("java/lang/Object.class") to a size + location.
     pub fn find_resource<'s>(&'s self, module_name: &CStr, version: &CStr, name: &CStr) -> Result<Resource<'s>> {
         let mut size = 0;
-        let result = unsafe { (self.api.JIMAGE_FindResource)(self.file, module_name.as_ptr(), version.as_ptr(), name.as_ptr(), &mut size) };
+        let result = unsafe { (self.api.JIMAGE_FindResource)(*self.file, module_name.as_ptr(), version.as_ptr(), name.as_ptr(), &mut size) };
         if result <= 0 {
             Err(ji2io(format!("file.find_resource({:?}, {:?}, {:?}) failed", module_name, version, name), result))
         } else {
@@ -119,13 +132,13 @@ impl File {
             f,
         };
         let context : *mut VisitContext::<F> = &mut context;
-        unsafe { (self.api.JIMAGE_ResourceIterator)(self.file, visit::<F>, context as *mut c_void) };
+        unsafe { (self.api.JIMAGE_ResourceIterator)(*self.file, visit::<F>, context as *mut c_void) };
     }
 }
 
 impl Drop for File {
     fn drop(&mut self) {
-        unsafe { (self.api.JIMAGE_Close)(self.file) };
+        unsafe { (self.api.JIMAGE_Close)(*self.file) };
     }
 }
 
@@ -147,7 +160,7 @@ impl Resource<'_> {
     /// Read the raw bytes of this resource into the given buffer
     pub fn get(&self, buffer: &mut [u8]) -> Result<u64> {
         let len = (buffer.len() as u64).min(std::i64::MAX as u64) as i64;
-        let result = unsafe { (self.file.api.JIMAGE_GetResource)(self.file.file, self.location, buffer.as_mut_ptr() as *mut _, len) };
+        let result = unsafe { (self.file.api.JIMAGE_GetResource)(*self.file.file, self.location, buffer.as_mut_ptr() as *mut _, len) };
         if result < 0 {
             Err(ji2io("resource.get(...) failed", result))
         } else {
@@ -214,6 +227,18 @@ impl<'file> VisitParams<'file> {
 struct VisitContext<'file, F: FnMut(VisitParams) -> VisitResult> {
     file:   &'file File,
     f:      F,
+}
+
+use ats::AssertThreadSafe;
+mod ats {
+    /// Assert that an individual field is "thread safe" (Sync + Send).  To make this type sound, this
+    /// is given a dedicated mod, forcing all users to use the `unsafe fn new` to construct this type.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)] #[repr(transparent)] pub(super) struct AssertThreadSafe<T>(T);
+    impl<T> AssertThreadSafe<T> { pub unsafe fn new(value: T) -> Self { Self(value) } }
+    unsafe impl<T> Send for AssertThreadSafe<T> {}
+    unsafe impl<T> Sync for AssertThreadSafe<T> {}
+    impl<T> std::ops::Deref     for AssertThreadSafe<T> { fn deref    (&    self) -> &    Self::Target { &    self.0 } type Target = T; }
+    impl<T> std::ops::DerefMut  for AssertThreadSafe<T> { fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 } }
 }
 
 fn ji2io(prefix: impl Display, err: impl Into<jlong>) -> Error {
