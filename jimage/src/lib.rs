@@ -4,12 +4,12 @@
 use jimage_sys as sys;
 use jni_sys::jlong;
 use std::fmt::Display;
-use std::ffi::*;
-use std::io::*;
+use std::ffi::{c_void, CStr};
+use std::io::ErrorKind;
 use std::ops::Drop;
-use std::os::raw::*;
-use std::path::*;
-use std::ptr::*;
+use std::os::raw::c_char;
+use std::path::Path;
+use std::ptr::{null, null_mut};
 use std::sync::Arc;
 
 /// A re-export of [std::io::Error](https://doc.rust-lang.org/std/io/struct.Error.html)
